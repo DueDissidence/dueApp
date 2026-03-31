@@ -146,7 +146,7 @@ def get_superchats(live_chat_id: str) -> None:
                         sc = snippet.super_chat_details
 
                         # skip normal chat messages
-                        if snippet.type not in [1, 15]:
+                        if snippet.type not in [15, 16]:
                             continue
 
                         author = msg.author_details
