@@ -93,7 +93,7 @@ const App = () => {
       }
 
       combined.sort(
-        (a, b) => new Date(b.created_on) - new Date(a.created_on)
+        (a, b) => new Date(a.created_on) - new Date(b.created_on)
       );
 
       setRants(combined);
