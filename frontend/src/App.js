@@ -10,38 +10,41 @@ import './App.css';
 import 'bootstrap-icons/font/bootstrap-icons.css';
 import placeholder from './img/placeholder.jpg';
 
-const Rant = ({input}) => {
-  const [rant, setRant] = useState({
-    picture: input.profile_pic_url ? input.profile_pic_url : placeholder,
-    username: input.username,
-    amount: input.amount_dollars,
-    date: input.created_on,
-    text: input.text,
-    copied: false
-  });
-  const copy_text = `${rant.username} $${rant.amount}: ${rant.text}`
+const Rant = ({ input }) => {
+  const picture = input.profile_pic_url ? input.profile_pic_url : placeholder;
+  const username = input.username;
+  const amount = input.amount_dollars;
+  const date = input.created_on;
+  const text = input.text;
+
+  const [copied, setCopied] = useState(false);
+  const copy_text = `${username} ${amount}: ${text}`;
 
   const handleClose = () => {
-    setRant({
-      ...rant,
-      copied: !rant.copied
-    })
-    navigator.clipboard.writeText(copy_text)
-  }
+    setCopied(true);
+    navigator.clipboard.writeText(copy_text);
+  };
 
   return (
-    <Toast className={rant.copied ? "faded" : ""}
+    <Toast className={copied ? "faded" : ""}
            onClose={handleClose}
-           key={rant.date}>
-      <Toast.Header>
-        <img src={rant.picture} className="rounded me-2" alt=""/>
-        <strong className="me-auto">{rant.username} ${rant.amount}</strong>
-        <small>{Moment(rant.date).format('HH:mm')}</small>
+           key={!date}>
+      <Toast.Header closeButton={true}>
+        <img
+          src={picture}
+          className="rounded me-2"
+          alt="profile"
+          width={32}
+          height={32}
+        />
+        <strong className="me-auto">
+          {username} {amount}
+        </strong>
+        <small>{Moment(date).format("HH:mm")}</small>
       </Toast.Header>
-      <Toast.Body>{rant.text}</Toast.Body>
+      <Toast.Body>{text}</Toast.Body>
     </Toast>
   );
-
 };
 
 const App = () => {
@@ -51,19 +54,53 @@ const App = () => {
   const [watching, setWatching] = useState(0)
 
   const getData = async () => {
-    await fetch("/api/rants")
-      .then(response => response.json())
-      .then(livestream => {
-        if (livestream.status === 200) {
-          setRants(livestream.rants)
-          setTitle(livestream.title)
-          setLikes(livestream.likes)
-          setWatching(livestream.watching)
-        } else {
-          console.log(livestream)
-        }
-      });
-  }
+    try {
+      const [rumbleResp, ytResp] = await Promise.all([
+        fetch("/api/rants"),
+        fetch("/api/youtube/superchats")
+      ]);
+
+      const rumble = await rumbleResp.json();
+      const yt = await ytResp.json();
+
+      let combined = [];
+
+      if (rumble.status === 200) {
+        const rumbleNormalized = (rumble.rants || []).map(r => ({
+          profile_pic_url: r.profile_pic_url,
+          username: r.username,
+          amount_dollars: `$${(r.amount_cents / 100).toFixed(2)}`,
+          created_on: r.created_on,
+          text: r.text,
+        }));
+        combined = combined.concat(rumbleNormalized);
+        setTitle(rumble.title);
+        setLikes(rumble.likes);
+        setWatching(rumble.watching);
+      }
+
+      if (yt.status === 200) {
+        const ytNormalized = (yt.superchats || []).map(sc => ({
+          profile_pic_url: sc.profileImageUrl,
+          username: sc.author,
+          amount_dollars: sc.amountMicros
+            ? sc.amountDisplayString
+            : sc.amountMicros / 1_000_000 || "",
+          created_on: sc.publishedAt,
+          text: sc.message,
+        }));
+        combined = combined.concat(ytNormalized);
+      }
+
+      combined.sort(
+        (a, b) => new Date(b.created_on) - new Date(a.created_on)
+      );
+
+      setRants(combined);
+    } catch (err) {
+      console.error("Error fetching data", err);
+    }
+  };
 
   useEffect(() => {
     getData();
@@ -92,8 +129,8 @@ const App = () => {
         </Container>
         <Container className="row p-2">
           <Stack className="rantstack flex-column-reverse" gap={2}>
-            {rants.map((rant, index) => (
-              <Rant key={index} input={rant}/>
+            {rants.map((rant) => (
+              <Rant key={rant.created_on} input={rant} />
             ))}
           </Stack>
         </Container>
