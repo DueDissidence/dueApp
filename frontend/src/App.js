@@ -102,12 +102,36 @@ const App = () => {
     }
   };
 
+  const getYouTubeID = async () => {
+    try {
+      await fetch("/api/youtube/streamid");
+    } catch (err) {
+      console.error("Error setting YouTube ID", err);
+    }
+  };
+
+  // This occurs on page load.
   useEffect(() => {
-    getData();
-    const interval = setInterval(() => {
-      getData();
-    }, 30000);
-    return () => clearInterval(interval);
+    let interval;
+
+    const init = async () => {
+      const ytResp = await getYouTubeID().catch((err) => {
+        console.error("YouTube ID init failed", err);
+        return null;
+      });
+
+      await getData();
+
+      interval = setInterval(() => {
+        getData();
+      }, 30000);
+    };
+
+    init();
+
+    return () => {
+      if (interval) clearInterval(interval);
+    };
   }, []);
 
   return (

@@ -64,7 +64,6 @@ async def rants() -> dict:
 
 
 async def get_live_chat_id(channel_id: str) -> str | None:
-    # 1) Find current live video for this channel (public, API key only).
     search_params = {
         "part": "id",
         "channelId": channel_id,
@@ -83,15 +82,21 @@ async def get_live_chat_id(channel_id: str) -> str | None:
 
     items = search_data.get("items", [])
     if not items:
-        print("No live video found for channel.")
-        return None
+        search_params["eventType"] = "upcoming"
+
+        async with httpx.AsyncClient() as client:
+            search_resp = await client.get(YOUTUBE_SEARCH_URL, params=search_params)
+            if search_resp.status_code != 200:
+                print("search.list error", search_resp.status_code, search_resp.text)
+                return None
+            search_data = search_resp.json()
+
+        items = search_data.get("items", [])
+        if not items:
+            print("No live video found for channel.")
+            return None
 
     video_id = items[0].get("id", {}).get("videoId")
-    if not video_id:
-        print("No videoId in search result.")
-        return None
-
-    # 2) Get activeLiveChatId for that video.
     videos_params = {
         "part": "liveStreamingDetails",
         "id": video_id,
@@ -143,11 +148,19 @@ def get_superchats(live_chat_id: str) -> None:
                     # Filter to only Super Chats and append to SUPERCHATS
                     for msg in response.items:
                         snippet = msg.snippet
-                        sc = snippet.super_chat_details
 
-                        # skip normal chat messages
-                        if snippet.type not in [15, 16]:
+                        if snippet.type not in [15, 16, 18]:
                             continue
+
+                        if snippet.type == 15:
+                            sc = snippet.super_chat_details
+                            message = sc.user_comment
+                        elif snippet.type == 16:
+                            sc = snippet.super_sticker_details
+                            message = "Super Sticker"
+                        elif snippet.type == 18:
+                            sc = snippet.membership_gifting_details
+                            message = f"{sc.gift_memberships_count} Gifted Membership(s)"
 
                         author = msg.author_details
 
@@ -156,7 +169,7 @@ def get_superchats(live_chat_id: str) -> None:
                             "author": author.display_name,
                             "authorChannelId": snippet.author_channel_id,
                             "profileImageUrl": author.profile_image_url,
-                            "message": sc.user_comment,
+                            "message": message,
                             "amountMicros": sc.amount_micros,
                             "amountDisplayString": sc.amount_display_string,
                             "currency": sc.currency,
@@ -200,10 +213,19 @@ async def ensure_superchat_stream_started():
         print("Superchat streaming thread started.")
 
 
-@app.get("/youtube/superchats")
-async def youtube_superchats() -> dict:
+@app.get("/youtube/streamid")
+async def youtube_get_stream_id() -> dict:
     await ensure_superchat_stream_started()
 
+    return {
+        "status": 200,
+        "liveChatId": CURRENT_LIVE_CHAT_ID,
+        "started": SUPERCHAT_THREAD_STARTED,
+    }
+
+
+@app.get("/youtube/superchats")
+async def youtube_superchats() -> dict:
     return {
         "status": 200,
         "superchats": list(SUPERCHATS),
