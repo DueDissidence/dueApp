@@ -1,5 +1,6 @@
 from app import stream_list_pb2_grpc, stream_list_pb2
 import threading
+import datetime
 import fastapi
 import httpx
 import time
@@ -17,6 +18,7 @@ YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 YOUTUBE_API_KEY = os.environ["YOUTUBE_KEY"]
 YOUTUBE_CHANNEL_ID = os.environ["YOUTUBE_CHANNEL_ID"]
 SUPERCHAT_THREAD_STARTED = False
+LIVE_CHAT_CLEAR_TIMER = None
 SUPERCHAT_THREAD_LOCK = threading.Lock()
 CURRENT_LIVE_CHAT_ID: str | None = None
 SUPERCHATS: list[dict] = []
@@ -191,7 +193,7 @@ def get_superchats(live_chat_id: str) -> None:
 
 
 async def ensure_superchat_stream_started():
-    global SUPERCHAT_THREAD_STARTED, CURRENT_LIVE_CHAT_ID
+    global SUPERCHAT_THREAD_STARTED, CURRENT_LIVE_CHAT_ID, LIVE_CHAT_CLEAR_TIMER
 
     with SUPERCHAT_THREAD_LOCK:
         if SUPERCHAT_THREAD_STARTED:
@@ -203,6 +205,25 @@ async def ensure_superchat_stream_started():
             return
 
         CURRENT_LIVE_CHAT_ID = live_chat_id
+
+        def _clear_live_chat_id(expected_chat_id):
+            global CURRENT_LIVE_CHAT_ID, LIVE_CHAT_CLEAR_TIMER
+            with SUPERCHAT_THREAD_LOCK:
+                if CURRENT_LIVE_CHAT_ID == expected_chat_id:
+                    CURRENT_LIVE_CHAT_ID = None
+                    print("CURRENT_LIVE_CHAT_ID cleared after 24 hours.")
+                LIVE_CHAT_CLEAR_TIMER = None
+
+        if LIVE_CHAT_CLEAR_TIMER is not None:
+            LIVE_CHAT_CLEAR_TIMER.cancel()
+
+        LIVE_CHAT_CLEAR_TIMER = threading.Timer(
+            datetime.timedelta(hours=24).total_seconds(),
+            _clear_live_chat_id,
+            args=(live_chat_id,)
+        )
+        LIVE_CHAT_CLEAR_TIMER.daemon = True
+        LIVE_CHAT_CLEAR_TIMER.start()
 
         def _worker():
             get_superchats(live_chat_id)
