@@ -1,6 +1,7 @@
 from app import stream_list_pb2_grpc, stream_list_pb2
+from pathlib import Path
 import threading
-import datetime
+import logging
 import fastapi
 import httpx
 import time
@@ -8,21 +9,34 @@ import grpc
 import os
 
 
+APP_ENV = os.getenv("APP_ENV", "development").lower()
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
+logger = logging.getLogger("backend")
+logger.setLevel(getattr(logging, LOG_LEVEL, logging.INFO))
+logger.handlers.clear()
+
+formatter = logging.Formatter(
+    "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
+
+if APP_ENV == "production":
+    log_path = Path("/backend/logs")
+    log_path.mkdir(parents=True, exist_ok=True)
+
+    file_handler = logging.FileHandler(log_path / "app.log")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+else:
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
 # Parameters for GET request
 url = "https://rumble.com/-livestream-api/get-data"
 headers = {'Accept': "application/json", "User-Agent": "Mozilla/5.0"}
 
 app = fastapi.FastAPI()
-YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
-YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
-YOUTUBE_API_KEY = os.environ["YOUTUBE_KEY"]
-YOUTUBE_CHANNEL_ID = os.environ["YOUTUBE_CHANNEL_ID"]
-SUPERCHAT_THREAD_STARTED = False
-LIVE_CHAT_CLEAR_TIMER = None
-SUPERCHAT_THREAD_LOCK = threading.Lock()
-CURRENT_LIVE_CHAT_ID: str | None = None
-SUPERCHATS: list[dict] = []
-
 
 def parse_livestream(data, code):
     livestream = {
@@ -65,189 +79,241 @@ async def rants() -> dict:
     return livestream
 
 
-async def get_live_chat_id(channel_id: str) -> str | None:
-    search_params = {
-        "part": "id",
-        "channelId": channel_id,
-        "eventType": "live",
-        "type": "video",
-        "maxResults": 1,
-        "key": YOUTUBE_API_KEY,
-    }
+YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
+YOUTUBE_VIDEOS_URL = "https://www.googleapis.com/youtube/v3/videos"
 
-    async with httpx.AsyncClient() as client:
-        search_resp = await client.get(YOUTUBE_SEARCH_URL, params=search_params)
-        if search_resp.status_code != 200:
-            print("search.list error", search_resp.status_code, search_resp.text)
+
+class SuperchatManager:
+    def __init__(self, youtube_api_key: str, youtube_channel_id: str):
+        self.youtube_api_key = youtube_api_key
+        self.youtube_channel_id = youtube_channel_id
+
+        self.lock = threading.Lock()
+        self.thread: threading.Thread | None = None
+        self.started = False
+        self.current_live_chat_id: str | None = None
+        self.superchats: list[dict] = []
+
+    async def get_live_chat_id(self) -> str | None:
+        params = {
+            "part": "id",
+            "channelId": self.youtube_channel_id,
+            "type": "video",
+            "maxResults": 1,
+            "key": self.youtube_api_key,
+        }
+
+        items = []
+        for event_type in ["live", "upcoming"]:
+            params["eventType"] = event_type
+
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(YOUTUBE_SEARCH_URL, params=params)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    items = data.get("items", [])
+                    if items:
+                        break
+                    logger.info("YouTube no stream with event type: %s", event_type)
+                else:
+                    logger.info(
+                        "YouTube livestream search failed: %s %s %s",
+                        resp.status_code,
+                        event_type,
+                        resp.text,
+                    )
+                    return None
+
+        if not items:
+            logger.info("No livestream found")
             return None
-        search_data = search_resp.json()
 
-    items = search_data.get("items", [])
-    if not items:
-        search_params["eventType"] = "upcoming"
+        video_id = items[0].get("id", {}).get("videoId")
+        params = {
+            "part": "liveStreamingDetails",
+            "id": video_id,
+            "key": self.youtube_api_key,
+        }
 
         async with httpx.AsyncClient() as client:
-            search_resp = await client.get(YOUTUBE_SEARCH_URL, params=search_params)
-            if search_resp.status_code != 200:
-                print("search.list error", search_resp.status_code, search_resp.text)
+            resp = await client.get(YOUTUBE_VIDEOS_URL, params=params)
+            if resp.status_code != 200:
+                logger.info(
+                    "YouTube video search failed: %s %s",
+                    resp.status_code,
+                    resp.text,
+                )
                 return None
-            search_data = search_resp.json()
+            videos_data = resp.json()
 
-        items = search_data.get("items", [])
-        if not items:
-            print("No live video found for channel.")
+        v_items = videos_data.get("items", [])
+        if not v_items:
+            logger.info("No video details found")
             return None
 
-    video_id = items[0].get("id", {}).get("videoId")
-    videos_params = {
-        "part": "liveStreamingDetails",
-        "id": video_id,
-        "key": YOUTUBE_API_KEY,
-    }
-
-    async with httpx.AsyncClient() as client:
-        videos_resp = await client.get(YOUTUBE_VIDEOS_URL, params=videos_params)
-        if videos_resp.status_code != 200:
-            print("videos.list error", videos_resp.status_code, videos_resp.text)
+        live_details = v_items[0].get("liveStreamingDetails", {})
+        live_chat_id = live_details.get("activeLiveChatId")
+        if not live_chat_id:
+            logger.info("No livechat found on video")
             return None
-        videos_data = videos_resp.json()
 
-    v_items = videos_data.get("items", [])
-    if not v_items:
-        print("No video details returned.")
-        return None
+        return live_chat_id
 
-    live_details = v_items[0].get("liveStreamingDetails", {})
-    live_chat_id = live_details.get("activeLiveChatId")
-    if not live_chat_id:
-        print("No activeLiveChatId on video.")
-        return None
+    def _reset_state(self) -> None:
+        with self.lock:
+            self.started = False
+            self.current_live_chat_id = None
+            self.superchats = []
+            self.thread = None
 
-    return live_chat_id
+    def _append_superchat(self, msg) -> None:
+        snippet = msg.snippet
 
+        if snippet.type not in [15, 16, 18]:
+            return
 
-def get_superchats(live_chat_id: str) -> None:
-    if not live_chat_id:
-        print("No live_chat_id provided; exiting.")
-        return
+        if snippet.type == 15:
+            sc = snippet.super_chat_details
+            message = sc.user_comment
+        elif snippet.type == 16:
+            sc = snippet.super_sticker_details
+            message = "Super Sticker"
+        elif snippet.type == 18:
+            sc = snippet.membership_gifting_details
+            message = f"{sc.gift_memberships_count} Gifted Membership(s)"
+        else:
+            sc = snippet
+            message = snippet.display_message
 
-    creds = grpc.ssl_channel_credentials()
-    with grpc.secure_channel("dns:///youtube.googleapis.com:443", creds) as channel:
-        stub = stream_list_pb2_grpc.V3DataLiveChatMessageServiceStub(channel)
-        metadata = (("x-goog-api-key", YOUTUBE_API_KEY),)
+        author = msg.author_details
 
-        next_page_token = ""
-        while True:
-            request = stream_list_pb2.LiveChatMessageListRequest(
-                part=["snippet", "authorDetails"],
-                live_chat_id=live_chat_id,
-                max_results=200,
-                page_token=next_page_token,
-            )
+        superchat = {
+            "id": msg.id,
+            "author": author.display_name,
+            "authorChannelId": snippet.author_channel_id,
+            "profileImageUrl": author.profile_image_url,
+            "message": message,
+            "amountMicros": getattr(sc, 'amount_micros', 0),
+            "amountDisplayString": getattr(sc, 'amount_display_string', '0'),
+            "currency": getattr(sc, 'currency', '$'),
+            "tier": getattr(sc, 'tier', 'A'),
+            "publishedAt": snippet.published_at,
+        }
 
-            try:
-                for response in stub.StreamList(request, metadata=metadata):
-                    # Filter to only Super Chats and append to SUPERCHATS
-                    for msg in response.items:
-                        snippet = msg.snippet
+        self.superchats.append(superchat)
 
-                        if snippet.type not in [15, 16, 18]:
+    def _run_superchat_stream(self, live_chat_id: str) -> None:
+        creds = grpc.ssl_channel_credentials()
+
+        try:
+            with grpc.secure_channel("dns:///youtube.googleapis.com:443", creds) as channel:
+                stub = stream_list_pb2_grpc.V3DataLiveChatMessageServiceStub(channel)
+                metadata = (("x-goog-api-key", self.youtube_api_key),)
+
+                next_page_token = ""
+                while True:
+                    request = stream_list_pb2.LiveChatMessageListRequest(
+                        part=["snippet", "authorDetails"],
+                        live_chat_id=live_chat_id,
+                        max_results=200,
+                        page_token=next_page_token,
+                    )
+
+                    try:
+                        stream_ended = False
+
+                        for response in stub.StreamList(request, metadata=metadata):
+
+                            if getattr(response, "offline_at", None):
+                                logger.info(
+                                    "YouTube live chat went offline at %s",
+                                    response.offline_at,
+                                )
+                                stream_ended = True
+                                break
+
+                            for msg in response.items:
+                                self._append_superchat(msg)
+
+                            next_page_token = response.next_page_token or ""
+
+                        if stream_ended:
+                            break
+
+                    except grpc.RpcError as e:
+                        if e.code() == grpc.StatusCode.UNAVAILABLE:
+                            time.sleep(10)
                             continue
 
-                        if snippet.type == 15:
-                            sc = snippet.super_chat_details
-                            message = sc.user_comment
-                        elif snippet.type == 16:
-                            sc = snippet.super_sticker_details
-                            message = "Super Sticker"
-                        elif snippet.type == 18:
-                            sc = snippet.membership_gifting_details
-                            message = f"{sc.gift_memberships_count} Gifted Membership(s)"
+                        logger.info("gRPC stream ended with error: %s", e)
+                        break
 
-                        author = msg.author_details
+        finally:
+            self._reset_state()
+            logger.info("Superchat streaming thread stopped.")
 
-                        superchat = {
-                            "id": msg.id,
-                            "author": author.display_name,
-                            "authorChannelId": snippet.author_channel_id,
-                            "profileImageUrl": author.profile_image_url,
-                            "message": message,
-                            "amountMicros": sc.amount_micros,
-                            "amountDisplayString": sc.amount_display_string,
-                            "currency": sc.currency,
-                            "tier": sc.tier,
-                            "publishedAt": snippet.published_at,
-                        }
-                        print(f'type: {snippet.type}')
-                        print(msg)
+    async def ensure_stream_started(self) -> None:
+        logger.info("Entering ensure_stream_started")
 
-                        SUPERCHATS.append(superchat)
+        with self.lock:
+            if self.started:
+                logger.info("Superchat thread already started.")
+                return
 
-                    next_page_token = response.next_page_token or ""
-            except grpc.RpcError as e:
-                print("gRPC error:", e.code(), e.details())
-                if e.code() == grpc.StatusCode.UNAVAILABLE:
-                    time.sleep(10)
-                    continue
-                break
-
-
-async def ensure_superchat_stream_started():
-    global SUPERCHAT_THREAD_STARTED, CURRENT_LIVE_CHAT_ID, LIVE_CHAT_CLEAR_TIMER
-
-    with SUPERCHAT_THREAD_LOCK:
-        if SUPERCHAT_THREAD_STARTED:
-            return
-
-        live_chat_id = await get_live_chat_id(YOUTUBE_CHANNEL_ID)
+        live_chat_id = await self.get_live_chat_id()
         if not live_chat_id:
-            print("No active YouTube live chat; superchat stream not started.")
+            logger.info("No active YouTube live chat; superchat stream not started.")
             return
 
-        CURRENT_LIVE_CHAT_ID = live_chat_id
+        with self.lock:
+            if self.started:
+                logger.info("Superchat thread already started after lookup.")
+                return
 
-        def _clear_live_chat_id(expected_chat_id):
-            global CURRENT_LIVE_CHAT_ID, LIVE_CHAT_CLEAR_TIMER
-            with SUPERCHAT_THREAD_LOCK:
-                if CURRENT_LIVE_CHAT_ID == expected_chat_id:
-                    CURRENT_LIVE_CHAT_ID = None
-                    print("CURRENT_LIVE_CHAT_ID cleared after 24 hours.")
-                LIVE_CHAT_CLEAR_TIMER = None
+            self.current_live_chat_id = live_chat_id
+            logger.info("current_live_chat_id set to %s", self.current_live_chat_id)
 
-        if LIVE_CHAT_CLEAR_TIMER is not None:
-            LIVE_CHAT_CLEAR_TIMER.cancel()
+            thread = threading.Thread(
+                target=self._run_superchat_stream,
+                args=(live_chat_id,),
+                daemon=True,
+            )
+            thread.start()
 
-        LIVE_CHAT_CLEAR_TIMER = threading.Timer(
-            datetime.timedelta(hours=24).total_seconds(),
-            _clear_live_chat_id,
-            args=(live_chat_id,)
-        )
-        LIVE_CHAT_CLEAR_TIMER.daemon = True
-        LIVE_CHAT_CLEAR_TIMER.start()
+            self.thread = thread
+            self.started = True
+            logger.info("Superchat streaming thread started.")
 
-        def _worker():
-            get_superchats(live_chat_id)
+    def get_status(self) -> dict:
+        with self.lock:
+            return {
+                "status": 200,
+                "liveChatId": self.current_live_chat_id,
+                "started": self.started,
+            }
 
-        thread = threading.Thread(target=_worker, daemon=True)
-        thread.start()
-        SUPERCHAT_THREAD_STARTED = True
-        print("Superchat streaming thread started.")
+    def get_superchats_payload(self) -> dict:
+        return {
+            "status": 200,
+            "superchats": list(self.superchats),
+        }
 
+
+superchat_manager = SuperchatManager(
+    youtube_api_key=os.environ["YOUTUBE_KEY"],
+    youtube_channel_id=os.environ["YOUTUBE_CHANNEL_ID"],
+)
+
+logger.info("YouTube Channel ID: %s", os.environ["YOUTUBE_CHANNEL_ID"])
 
 @app.get("/youtube/streamid")
 async def youtube_get_stream_id() -> dict:
-    await ensure_superchat_stream_started()
-
-    return {
-        "status": 200,
-        "liveChatId": CURRENT_LIVE_CHAT_ID,
-        "started": SUPERCHAT_THREAD_STARTED,
-    }
+    await superchat_manager.ensure_stream_started()
+    result = superchat_manager.get_status()
+    logger.info("youtube_get_stream_id response: %s", result)
+    return result
 
 
 @app.get("/youtube/superchats")
 async def youtube_superchats() -> dict:
-    return {
-        "status": 200,
-        "superchats": list(SUPERCHATS),
-    }
+    return superchat_manager.get_superchats_payload()

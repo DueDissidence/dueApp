@@ -1,5 +1,9 @@
 .env
 .idea
+.vscode
+.conda
 traefik/certs
 acme.json
 frontend/node_modules
+docker-compose.local.yml
+temp.txt

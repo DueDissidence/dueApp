@@ -23,3 +23,17 @@
     width: 20px;
     height: 20px;
 }
+
+.toast-header-youtube {
+  background-color: #ff0033 !important;
+  color: white !important;
+}
+
+.toast-header-rumble {
+  background-color: #85c742 !important;
+  color: white !important;
+}
+
+.toast-header-youtube .btn-close {
+  filter: invert(1);
+}

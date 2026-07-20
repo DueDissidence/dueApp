@@ -1,12 +1,8 @@
-version: "3.9"
-
 services:
 
   traefik:
-    container_name: &_tfk traefik
-    image: traefik:v2.8
-    build:
-      context: *_tfk
+    container_name: traefik
+    image: traefik:v3.6
     restart: always
     command:
       - --api=true
@@ -16,10 +12,10 @@ services:
       - --providers.docker.exposedbydefault=false
       - --entrypoints.https.forwardedHeaders.trustedIPs=173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/12,172.64.0.0/13,131.0.72.0/22
       - --certificatesresolvers.cf.acme.caserver=https://acme-v02.api.letsencrypt.org/directory
-      - --certificatesresolvers.cf.acme.email=$CF_API_EMAIL
+      - --certificatesresolvers.cf.acme.email=${CF_API_EMAIL}
       - --certificatesresolvers.cf.acme.storage=/acme.json
-      - --certificatesresolvers.cf.acme.dnsChallenge.provider=cloudflare
-      - --certificatesResolvers.cf.acme.dnsChallenge=true
+      - --certificatesresolvers.cf.acme.dnschallenge.provider=cloudflare
+      - --certificatesresolvers.cf.acme.dnschallenge=true
     ports:
       - "80:80"
       - "443:443"
@@ -29,48 +25,36 @@ services:
     env_file:
       - .env
     environment:
-      - CF_API_EMAIL=$CF_API_EMAIL
-      - CF_DNS_API_TOKEN=$CF_DNS_API_TOKEN
+      - CF_API_EMAIL=${CF_API_EMAIL}
+      - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
     volumes:
       - ./traefik/acme.json:/acme.json
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - /etc/timezone:/etc/timezone:ro
     labels:
-      # global redirect to https
       - traefik.http.routers.http-catchall.entrypoints=http
       - traefik.http.routers.http-catchall.rule=hostregexp(`{host:.+}`)
       - traefik.http.routers.http-catchall.middlewares=redirect-to-https
       - traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https
-
-      # Dashboard
       - traefik.enable=true
-      - traefik.http.routers.*_tfk.tls=true
-      - traefik.http.routers.*_tfk.entrypoints=https
-      - traefik.http.routers.*_tfk.rule=Host(`tf.$DOMAINNAME`)
-      - traefik.http.routers.*_tfk.service=api@internal
-      - traefik.http.routers.*_tfk.tls.certresolver=cf
-
-      # BasicAuth
-      - traefik.http.routers.*_tfk.middlewares=authtraefik
+      - traefik.http.routers.dashboard.tls=true
+      - traefik.http.routers.dashboard.entrypoints=https
+      - traefik.http.routers.dashboard.rule=Host(`tf.${DOMAINNAME}`)
+      - traefik.http.routers.dashboard.service=api@internal
+      - traefik.http.routers.dashboard.tls.certresolver=cf
+      - traefik.http.routers.dashboard.middlewares=authtraefik
       - traefik.http.middlewares.authtraefik.basicauth.users=${BASICAUTH}
 
   backend:
-    container_name: &_bk backend
-    build: *_bk
-    command: gunicorn app.main:app --bind 0.0.0.0:8000 -k uvicorn.workers.UvicornWorker -t 900
+    container_name: backend
+    build:
+      context: ./backend
+      target: production
+    working_dir: /backend
     user: "${PUID}:${PGID}"
-    volumes:
-      - /etc/timezone:/etc/timezone:ro
-    restart: unless-stopped
-    networks:
-      - web
-    env_file:
-      - .env
-
-  frontend:
-    container_name: &_ft frontend
-    build: *_ft
-    command: nginx -g "daemon off;"
+    environment:
+      - APP_ENV=production
+      - LOG_LEVEL=INFO
     volumes:
       - /etc/timezone:/etc/timezone:ro
     restart: unless-stopped
@@ -81,11 +65,35 @@ services:
     labels:
       - traefik.enable=true
       - traefik.docker.network=web
-      - traefik.http.routers.*_ft.tls=true
-      - traefik.http.routers.*_ft.entrypoints=https
-      - traefik.http.routers.*_ft.rule=Host(`app.$DOMAINNAME`)
-      - traefik.http.services.*_ft.loadbalancer.server.port=80
-      - traefik.http.routers.*_ft.tls.certresolver=cf
+      - traefik.http.routers.backend.tls=true
+      - traefik.http.routers.backend.entrypoints=https
+      - traefik.http.routers.backend.rule=Host(`app.${DOMAINNAME}`) && PathPrefix(`/api`)
+      - traefik.http.routers.backend.priority=100
+      - traefik.http.routers.backend.middlewares=backend-strip
+      - traefik.http.middlewares.backend-strip.stripprefix.prefixes=/api
+      - traefik.http.services.backend.loadbalancer.server.port=8000
+
+  frontend:
+    container_name: frontend
+    build:
+      context: ./frontend
+      target: production
+    working_dir: /frontend
+    volumes:
+      - /etc/timezone:/etc/timezone:ro
+    restart: unless-stopped
+    networks:
+      - web
+    env_file:
+      - .env
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=web
+      - traefik.http.routers.frontend.tls=true
+      - traefik.http.routers.frontend.entrypoints=https
+      - traefik.http.routers.frontend.rule=Host(`app.${DOMAINNAME}`)
+      - traefik.http.services.frontend.loadbalancer.server.port=80
+      - traefik.http.routers.frontend.tls.certresolver=cf
 
 networks:
   web:
