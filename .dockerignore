@@ -1,4 +1,9 @@
+node_modules
+build
 .git
-.DS_Store
+.gitignore
+Dockerfile
+docker-compose.yml
+npm-debug.log
+*.log
 .env
-frontend/node_modules

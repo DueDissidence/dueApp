@@ -47,9 +47,7 @@ services:
 
   backend:
     container_name: backend
-    build:
-      context: ./backend
-      target: production
+    image: jboes/dueapp-backend:latest
     working_dir: /backend
     user: "${PUID}:${PGID}"
     environment:
@@ -75,9 +73,7 @@ services:
 
   frontend:
     container_name: frontend
-    build:
-      context: ./frontend
-      target: production
+    image: jboes/dueapp-frontend:latest
     working_dir: /frontend
     volumes:
       - /etc/timezone:/etc/timezone:ro
