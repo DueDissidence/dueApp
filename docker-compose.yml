@@ -16,6 +16,7 @@ services:
       - --certificatesresolvers.cf.acme.storage=/acme.json
       - --certificatesresolvers.cf.acme.dnschallenge.provider=cloudflare
       - --certificatesresolvers.cf.acme.dnschallenge=true
+      - --certificatesresolvers.cf.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53
     ports:
       - "80:80"
       - "443:443"
@@ -70,6 +71,7 @@ services:
       - traefik.http.routers.backend.middlewares=backend-strip
       - traefik.http.middlewares.backend-strip.stripprefix.prefixes=/api
       - traefik.http.services.backend.loadbalancer.server.port=8000
+      - traefik.http.routers.backend.tls.certresolver=cf
 
   frontend:
     container_name: frontend

@@ -21,7 +21,7 @@ formatter = logging.Formatter(
 )
 
 if APP_ENV == "production":
-    log_path = Path("/backend/logs")
+    log_path = Path("/tmp/logs")
     log_path.mkdir(parents=True, exist_ok=True)
 
     file_handler = logging.FileHandler(log_path / "app.log")
